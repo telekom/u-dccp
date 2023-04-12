@@ -216,6 +216,7 @@ unsigned int udp_hook(void *priv,
 
     struct iphdr *iph_u;
     struct dccp_hdr *dccp_header_u;
+    bool linearize_func_used = false;
 
     if (!skb) {
         //printk(KERN_INFO "no skb");
@@ -242,16 +243,31 @@ unsigned int udp_hook(void *priv,
             return NF_ACCEPT;
         }
 
-        //validate UDP checksum otherwise DROP
-        csum_v = skb_checksum(skb, skb_transport_offset(skb),
-                               (int) (skb->len - (iph_u->ihl*4)),0);
-        if(csum_tcpudp_magic(iph_u->saddr, iph_u->daddr,
-                        (int) (skb->len - (iph_u->ihl*4)), IPPROTO_UDP,csum_v)) {
-            //printk(KERN_INFO "bad dccp checksumf");
+    if (skb_is_nonlinear(skb)){
+        linearize_func_used = true;
+        if (skb_linearize(skb)){
+            //printk(KERN_INFO "linearize error");
             return NF_DROP;
         }
-        skb->ip_summed = 1; 
+    }
 
+        //Read again dccp header and IP header
+        dccp_header_u = dccp_hdr(skb);
+        iph_u = (struct iphdr *)skb_network_header(skb);
+
+
+        //validate UDP checksum otherwise DROP
+        if (!skb_csum_unnecessary(skb)){
+            csum_v = skb_checksum(skb, skb_transport_offset(skb),
+                               (int) (skb->len - (iph_u->ihl*4)),0);
+            if(csum_tcpudp_magic(iph_u->saddr, iph_u->daddr,
+                        (int) (skb->len - (iph_u->ihl*4)), IPPROTO_UDP,csum_v)) {
+                printk(KERN_INFO "bad dccp checksumf");
+                return NF_DROP;            
+            }
+        skb->ip_summed = 1;
+        }
+ 
         //Following: UDP to DCCP conversion
 
         //restore Data Offset field 
@@ -285,6 +301,8 @@ unsigned int udp_hook(void *priv,
         dccp_header_u->dccph_checksum = 0;
 
         //build checksum over header and payload
+
+
         csum_u = skb_checksum(skb, skb_transport_offset(skb),
                                (int) (skb->len - (iph_u->ihl*4)),0);
 
@@ -292,10 +310,9 @@ unsigned int udp_hook(void *priv,
         dccp_header_u->dccph_checksum = csum_tcpudp_magic(iph_u->saddr,iph_u->daddr,
                                                            (int) (skb->len - (iph_u->ihl*4)),
                                                            IPPROTO_DCCP,csum_u);
-        
+
         //-> successfully restored the DCCP datagram
     }
-
 
     return NF_ACCEPT;
 }
@@ -337,6 +354,8 @@ static int __init initialize(void) {
         printk(KERN_INFO "DCCP<->UDP conversion initialized\n");
         return 0;
 }
+
+
 
 //unregister the hooks if kernel module is exited
 static void __exit cleanup(void) {
